@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package protocol;
+
+message post {
+ int64 id = 1;
+ bool deleted = 2;
+ string type = 3;
+ string author = 4;
+ int64 time = 5;
+ bool dead = 6;
+ int64 parent = 7;
+ repeated int64 kids = 8;
+ string url = 9;
+ string title = 10;
+ repeated int64 parts = 11;
+ int64 descendants = 12;
+ string text = 13;
+}
