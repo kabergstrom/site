@@ -1,4 +1,12 @@
 package subjects
 
-// Posts subject contains messages of proto type Post
-const Posts string = "posts"
+const (
+	// HackerNewsPosts subject where hacker news posts get published
+	HackerNewsPosts string = "hacker-news.posts"
+
+	// HackerNewsUsers subject where hacker news users get published
+	HackerNewsUsers string = "hacker-news.users"
+
+	// HackerNewsGetObject subject for requesting objects from hacker news
+	HackerNewsGetObject string = "hacker-news.get-object"
+)

@@ -1,0 +1,21 @@
+syntax = "proto3";
+package db;
+
+message post {
+ int64 author = 1;
+ bool dead = 2;
+ int64 parent = 3;
+ string url = 4;
+ string title = 5;
+ string text = 7;
+ repeated int64 parts = 8;
+}
+
+message user {
+    string name = 1;
+    string about = 2;
+}
+
+message kids {
+ repeated int64 kids = 1;
+}
