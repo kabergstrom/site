@@ -21,6 +21,8 @@ import (
 	nats "github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
+
+	"github.com/pkg/errors"
 )
 
 type postProcessor struct {
@@ -81,19 +83,89 @@ func (proc *postProcessor) processHnPost(m *stan.Msg) {
 	var ctx processingContext
 	ctx.processedPosts = make(map[int64]int64)
 	ctx.processedUsers = make(map[string]int64)
-	for {
-		if err := proc.onHackerNewsPost(m.Data, ctx); err == nil {
-			break
-		} else {
-			fmt.Printf("Error processing post %s: %s", strconv.FormatInt(int64(m.Sequence), 10), err)
+	if err := proc.onHackerNewsPost(m.Data, ctx); err == nil {
+		m.Ack()
+		fmt.Printf("Acked post %s\n", strconv.FormatInt(int64(m.Sequence), 10))
+	} else {
+		fmt.Printf("Error processing post %s: %s", strconv.FormatInt(int64(m.Sequence), 10), err)
+	}
+}
+
+func (proc *postProcessor) getUserIDFromHNID(author string, ctx processingContext) (userID int64, err error) {
+	dbAuthor := hnUserIDtoDatabaseID(author)
+	source := protocol.HackerNews
+	userID, ok := ctx.processedUsers[author]
+	if ok == false {
+		userID, err = proc.db.GetObjectIDFromSourceID(source, dbAuthor)
+		if err != nil {
+			err = nil
+			userID = proc.snowflake.Generate().Int64()
+			if err := proc.db.InsertSourceIDToObjectID(userID, source, dbAuthor); err != nil {
+				me, ok := err.(*mysql.MySQLError)
+				if !ok {
+					log.Fatal(err)
+				}
+				// if it's not duplicate key error, bail
+				if me.Number != 1062 {
+					log.Fatal(err)
+				}
+				userID, err = proc.db.GetObjectIDFromSourceID(source, dbAuthor)
+				if err != nil {
+					log.Fatal(err)
+				}
+			}
+			ctx.processedUsers[author] = userID
+			request := protocol.HnObjectRequest{
+				Username: author,
+				Type:     protocol.HnObjectRequest_USER,
+			}
+			payload, err := proto.Marshal(&request)
+			if err != nil {
+				log.Fatal(err)
+			}
+			requestStart := time.Now()
+			timeout, _ := time.ParseDuration("10s")
+			msg, err := proc.stan.NatsConn().Request(subjects.HackerNewsGetObject, payload, timeout)
+			if err != nil {
+				return 0, err
+			}
+			fmt.Printf("Request for user %s took %s\n", author, time.Now().Sub(requestStart).String())
+			var user protocol.HnUser
+			if err := proto.Unmarshal(msg.Data, &user); err != nil {
+				log.Fatal(err)
+			}
+			var submittedIDs []int64
+			/*for _, submitted := range user.Submitted {
+				dbID, err := proc.getPostIDFromHNID(submitted, ctx)
+				if err != nil {
+					log.Fatal(err)
+				}
+				submittedIDs = append(submittedIDs, dbID)
+			}*/
+			dbObj, err := hnUserToDBObject(user, userID, submittedIDs)
+			if err != nil {
+				log.Fatal(err)
+			}
+			err = proc.db.InsertObject(dbObj)
+			if err != nil {
+				me, ok := err.(*mysql.MySQLError)
+				if !ok {
+					log.Fatal(err)
+				}
+				// if it's not duplicate key error, bail
+				if me.Number != 1062 {
+					log.Fatal(err)
+				}
+				err = nil // otherwise, ignore error
+			}
+			userID = dbObj.ID
 		}
 	}
-	m.Ack()
-	fmt.Printf("Acked post %s\n", strconv.FormatInt(int64(m.Sequence), 10))
+	return
 }
 
 func (proc *postProcessor) getPostIDFromHNID(hnID int64, ctx processingContext) (int64, error) {
-	timeout, _ := time.ParseDuration("1s")
+	timeout, _ := time.ParseDuration("10s")
 	if val, ok := ctx.processedPosts[hnID]; ok {
 		return val, nil
 	}
@@ -146,55 +218,12 @@ func (proc *postProcessor) onHackerNewsPost(postData []byte, ctx processingConte
 	if p.Type == "title" {
 		fmt.Printf("Processed post with title %s\n", p.Title)
 	}
-	timeout, _ := time.ParseDuration("1s")
 
 	var dbData db.Post
 	if p.Author != "" {
-		userID, ok := ctx.processedUsers[p.Author]
-		if ok == false {
-			userID, err = proc.db.GetObjectIDFromSourceID(protocol.SourceID(p.Source), hnUserIDtoDatabaseID(p.Author))
-			if err != nil {
-				userID = proc.snowflake.Generate().Int64()
-				if err := proc.db.InsertSourceIDToObjectID(userID, protocol.SourceID(p.Source), hnUserIDtoDatabaseID(p.Author)); err != nil {
-					log.Fatal(err)
-				}
-				ctx.processedUsers[p.Author] = userID
-				request := protocol.HnObjectRequest{
-					Username: p.Author,
-					Type:     protocol.HnObjectRequest_USER,
-				}
-				payload, err := proto.Marshal(&request)
-				if err != nil {
-					log.Fatal(err)
-				}
-				requestStart := time.Now()
-				msg, err := proc.stan.NatsConn().Request(subjects.HackerNewsGetObject, payload, timeout)
-				if err != nil {
-					return err
-				}
-				fmt.Printf("Request for user %s took %s\n", p.Author, time.Now().Sub(requestStart).String())
-				var user protocol.HnUser
-				if err := proto.Unmarshal(msg.Data, &user); err != nil {
-					log.Fatal(err)
-				}
-				var submittedIDs []int64
-				/*for _, submitted := range user.Submitted {
-					dbID, err := proc.getPostIDFromHNID(submitted, ctx)
-					if err != nil {
-						log.Fatal(err)
-					}
-					submittedIDs = append(submittedIDs, dbID)
-				}*/
-				dbObj, err := hnUserToDBObject(user, userID, submittedIDs)
-				if err != nil {
-					log.Fatal(err)
-				}
-				err = proc.db.InsertObject(dbObj)
-				if err != nil {
-					log.Fatal(err)
-				}
-				userID = dbObj.ID
-			}
+		userID, err := proc.getUserIDFromHNID(p.Author, ctx)
+		if err != nil {
+			return errors.Wrapf(err, "Error getting author from HN name %s\n", p.Author)
 		}
 		dbData.Author = userID
 	}
@@ -204,7 +233,7 @@ func (proc *postProcessor) onHackerNewsPost(postData []byte, ctx processingConte
 	if p.Parent != 0 {
 		parentID, err := proc.getPostIDFromHNID(p.Parent, ctx)
 		if err != nil {
-			return err
+			return errors.Wrapf(err, "Error getting post from HN id %d\n", p.Parent)
 		}
 		dbData.Parent = parentID
 	}
@@ -219,7 +248,7 @@ func (proc *postProcessor) onHackerNewsPost(postData []byte, ctx processingConte
 		for _, hnPartID := range p.Parts {
 			dbPartID, err := proc.getPostIDFromHNID(hnPartID, ctx)
 			if err != nil {
-				return err
+				return errors.Wrapf(err, "Error getting post part from HN id %d\n", hnPartID)
 			}
 			dbData.Parts = append(dbData.Parts, dbPartID)
 		}
@@ -239,6 +268,8 @@ func (proc *postProcessor) onHackerNewsPost(postData []byte, ctx processingConte
 		obj.Type = protocol.Poll
 	case "pollopt":
 		obj.Type = protocol.PollOpt
+	default:
+		log.Fatal(fmt.Sprintf("Unrecognized hackernews object type %s", p.Type))
 	}
 	obj.SourceScore = p.Score
 	obj.Deleted = p.Deleted
@@ -251,11 +282,12 @@ func (proc *postProcessor) onHackerNewsPost(postData []byte, ctx processingConte
 	for _, hnCommentID := range p.Kids {
 		dbID, err := proc.getPostIDFromHNID(hnCommentID, ctx)
 		if err != nil {
-			return err
+			return errors.Wrapf(err, "Error getting comment from HN id %d\n", hnCommentID)
 		}
 		commentIDs = append(commentIDs, dbID)
 	}
 	obj.Kids = db.Kids{Kids: commentIDs}
+	obj.NumKids = int32(len(commentIDs))
 	if err := proc.db.InsertObject(obj); err != nil {
 		me, ok := err.(*mysql.MySQLError)
 		if !ok {
@@ -298,6 +330,14 @@ func (proc *postProcessor) onHackerNewsPost(postData []byte, ctx processingConte
 		if err != nil {
 			log.Fatal(err)
 		}
+		mod := protocol.ObjectModified{
+			Id: objectID,
+		}
+		payload, err := proto.Marshal(&mod)
+		if err != nil {
+			log.Fatal(err)
+		}
+		proc.stan.PublishAsync(subjects.ObjectsModified, payload, nil)
 	}
 	return nil
 }
@@ -321,7 +361,7 @@ func main() {
 	defer nc.Close()
 	processor.stan = nc
 
-	sql, err := sql.Open("mysql", "root:test@tcp(54.149.61.225:3306)/site")
+	sql, err := sql.Open("mysql", "root:test@tcp(localhost:3306)/site")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -332,17 +372,20 @@ func main() {
 	}
 	processor.db = dbi
 
-	aw, _ := time.ParseDuration("1s")
+	aw, _ := time.ParseDuration("30s")
 
 	hnPostChannel := make(chan *stan.Msg)
 
 	nc.Subscribe(subjects.HackerNewsPosts, func(m *stan.Msg) { hnPostChannel <- m }, stan.SetManualAckMode(), stan.AckWait(aw), stan.DurableName("nats2db"), stan.StartAt(pb.StartPosition_First))
-	go func() {
-		for {
-			msg := <-hnPostChannel
-			processor.processHnPost(msg)
-		}
-	}()
+	concurrency := 10
+	for i := 0; i < concurrency; i++ {
+		go func(c chan *stan.Msg) {
+			for {
+				msg := <-c
+				processor.processHnPost(msg)
+			}
+		}(hnPostChannel)
+	}
 	for nc.NatsConn().Status() != nats.DISCONNECTED {
 		time.Sleep(time.Second)
 	}

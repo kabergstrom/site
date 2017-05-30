@@ -19,3 +19,7 @@ message user {
 message kids {
  repeated int64 kids = 1;
 }
+
+message listing {
+ repeated int64 objects = 1;
+}

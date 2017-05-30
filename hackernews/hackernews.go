@@ -93,50 +93,62 @@ func main() {
 	}
 	defer f.StopWatching()
 
-	reqFgo := firego.New("", client)
-	nc.NatsConn().Subscribe(subjects.HackerNewsGetObject, func(m *nats.Msg) {
-		start := time.Now()
-		replySubject := m.Reply
-		var request protocol.HnObjectRequest
-		if err := proto.Unmarshal(m.Data, &request); err != nil {
-			log.Fatal(err)
+	{
+		getChan := make(chan *nats.Msg)
+		nc.NatsConn().Subscribe(subjects.HackerNewsGetObject, func(m *nats.Msg) {
+			getChan <- m
+		})
+		concurrency := 20
+		for i := 0; i < concurrency; i++ {
+			go func(c chan *nats.Msg) {
+				reqFgo := firego.New("", client)
+				for {
+					m := <-c
+					start := time.Now()
+					replySubject := m.Reply
+					var request protocol.HnObjectRequest
+					if err := proto.Unmarshal(m.Data, &request); err != nil {
+						log.Fatal(err)
+					}
+					switch request.Type {
+					case protocol.HnObjectRequest_USER:
+						if replySubject == "" {
+							replySubject = subjects.HackerNewsUsers
+						}
+						reqFgo.SetURL(fmt.Sprintf(profileURL, request.Username))
+						var profile hnProfile
+						err := reqFgo.Value(&profile)
+						if err != nil {
+							return
+						}
+						p := hnUserToProtocol(profile)
+						replyBuffer, err := proto.Marshal(&p)
+						if err != nil {
+							log.Fatal(fmt.Sprintf("Error marshalling reply for %s", subjects.HackerNewsGetObject))
+						}
+						nc.NatsConn().Publish(replySubject, replyBuffer)
+					case protocol.HnObjectRequest_POST:
+						if replySubject == "" {
+							replySubject = subjects.HackerNewsPosts
+						}
+						reqFgo.SetURL(fmt.Sprintf(itemURL, request.Id))
+						var post hnPost
+						err := reqFgo.Value(&post)
+						if err != nil {
+							return
+						}
+						p := hnPostToProtocol(post)
+						replyBuffer, err := proto.Marshal(&p)
+						if err != nil {
+							log.Fatal(fmt.Sprintf("Error marshalling reply for %s", subjects.HackerNewsGetObject))
+						}
+						nc.NatsConn().Publish(replySubject, replyBuffer)
+					}
+					fmt.Printf("Response sent in %s for %s\n", time.Now().Sub(start).String(), request.Type.String())
+				}
+			}(getChan)
 		}
-		switch request.Type {
-		case protocol.HnObjectRequest_USER:
-			if replySubject == "" {
-				replySubject = subjects.HackerNewsUsers
-			}
-			reqFgo.SetURL(fmt.Sprintf(profileURL, request.Username))
-			var profile hnProfile
-			err := reqFgo.Value(&profile)
-			if err != nil {
-				return
-			}
-			p := hnUserToProtocol(profile)
-			replyBuffer, err := proto.Marshal(&p)
-			if err != nil {
-				log.Fatal(fmt.Sprintf("Error marshalling reply for %s", subjects.HackerNewsGetObject))
-			}
-			nc.NatsConn().Publish(replySubject, replyBuffer)
-		case protocol.HnObjectRequest_POST:
-			if replySubject == "" {
-				replySubject = subjects.HackerNewsPosts
-			}
-			reqFgo.SetURL(fmt.Sprintf(itemURL, request.Id))
-			var post hnPost
-			err := reqFgo.Value(&post)
-			if err != nil {
-				return
-			}
-			p := hnPostToProtocol(post)
-			replyBuffer, err := proto.Marshal(&p)
-			if err != nil {
-				log.Fatal(fmt.Sprintf("Error marshalling reply for %s", subjects.HackerNewsGetObject))
-			}
-			nc.NatsConn().Publish(replySubject, replyBuffer)
-		}
-		fmt.Printf("Response sent in %s for %s\n", time.Now().Sub(start).String(), request.Type.String())
-	})
+	}
 
 	fireGoClient := firego.New("", client)
 	ackHandler := func(ackedNuid string, err error) {

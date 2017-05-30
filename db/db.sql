@@ -38,3 +38,22 @@ CREATE TABLE IF NOT EXISTS source_id_to_object_id (
     PRIMARY KEY(source, source_id),
     UNIQUE INDEX obj_id(object_id)
 );
+
+CREATE TABLE IF NOT EXISTS listing_cache (
+    `id` INT NOT NULL,
+    `data` BLOB NOT NULL,
+    `version` INT NOT NULL,
+    PRIMARY KEY(id)
+);
+
+INSERT INTO `innodb_memcache`.`containers` (
+       `name`, `db_schema`, `db_table`, `key_columns`, `value_columns`,
+       `flags`, `cas_column`, `expire_time_column`, `unique_idx_name_on_key`)
+       VALUES ('object_data', 'site', 'object', 'id', 'id|source|type|score|source_score|deleted|unixtime|compression|encoding|num_kids|data|kids', 
+'0','version','0','PRIMARY');
+
+INSERT INTO `innodb_memcache`.`containers` (
+       `name`, `db_schema`, `db_table`, `key_columns`, `value_columns`,
+       `flags`, `cas_column`, `expire_time_column`, `unique_idx_name_on_key`)
+       VALUES ('listing_data', 'site', 'listing_cache', 'id', 'data', 
+'0','version','0','PRIMARY');

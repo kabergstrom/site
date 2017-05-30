@@ -36,3 +36,8 @@ message hn_user {
     string about = 5;
     repeated int64 submitted = 6;
 }
+message object_modified {
+    int64 id = 1;
+    string mysql_file = 2;
+    uint32 mysql_pos = 3;
+}

@@ -2,21 +2,33 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"runtime/pprof"
 
 	"strconv"
-
-	"io"
-	"strings"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/kabergstrom/site/db"
 	"github.com/kabergstrom/site/protocol"
 	"github.com/labstack/echo"
+	mw "github.com/labstack/echo/middleware"
+	"github.com/pkg/errors"
 	"github.com/rainycape/memcache"
 )
+
+type apiCtx struct {
+	mcObj     *memcache.Client
+	mcListing *memcache.Client
+}
+
+type author struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
 
 type object struct {
 	ID       string `json:"id"`
@@ -34,65 +46,27 @@ type user struct {
 }
 type linkPost struct {
 	object
-	Text   string   `json:"text"`
-	URL    string   `json:"url"`
-	Dead   bool     `json:"dead"`
-	Author string   `json:"author"`
-	Kids   []string `json:"kids"`
+	Text    string `json:"text"`
+	URL     string `json:"url"`
+	Dead    bool   `json:"dead"`
+	Author  author `json:"author"`
+	NumKids int32  `json:"num_kids"`
 }
 type textPost struct {
 	object
-	Title  string   `json:"title"`
-	Text   string   `json:"text"`
-	Author string   `json:"author"`
-	Kids   []string `json:"kids"`
+	Title   string `json:"title"`
+	Text    string `json:"text"`
+	Author  author `json:"author"`
+	NumKids int32  `json:"num_kids"`
 }
 type comment struct {
 	object
-	Text   string   `json:"text"`
-	Author string   `json:"author"`
-	Parent string   `json:"parent"`
-	Kids   []string `json:"kids"`
+	Text    string `json:"text"`
+	Author  author `json:"author"`
+	Parent  string `json:"parent"`
+	NumKids int32  `json:"num_kids"`
 }
 
-func parseMemCacheObj(val []byte) (obj db.Object, err error) {
-	str := string(val)
-	endIndex := 0
-	for i := 0; i < 10; i++ {
-		increment := strings.Index(str[endIndex+1:], "|")
-		if increment == -1 {
-			err = io.EOF
-			return
-		}
-		endIndex += increment + 1
-	}
-	deletedNum := 0
-	wotStr := string(val[:endIndex])
-	_, err = fmt.Sscanf(wotStr, "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &obj.ID, &obj.Source, &obj.Type, &obj.Score, &obj.SourceScore, &deletedNum, &obj.UnixTime, &obj.Compression, &obj.Encoding, &obj.NumKids)
-	if err != nil {
-		return
-	}
-	data, err := db.DecodeData(val[endIndex+1:], obj.Type)
-	if err != nil {
-		return
-	}
-	obj.Data = data
-
-	serializedSize, err := proto.NewBuffer(val[endIndex+1:]).DecodeVarint()
-	if err != nil {
-		return
-	}
-	newStart := endIndex + int(serializedSize) + 2 + proto.SizeVarint(uint64(serializedSize))
-	kids, err := db.DecodeKids(val[newStart:])
-	fmt.Println("values = " + string(val[:endIndex]))
-	fmt.Println("data = " + string(val[endIndex+1:]))
-	fmt.Println("kids = " + string(val[newStart:]))
-	if err != nil {
-		return
-	}
-	obj.Kids = kids
-	return
-}
 func apiObjectType(t protocol.ObjectType) (string, error) {
 	switch t {
 	case protocol.LinkPost:
@@ -114,7 +88,25 @@ func apiObjectType(t protocol.ObjectType) (string, error) {
 	}
 }
 
-func dbObjectToAPIObject(obj db.Object) (retVal interface{}, err error) {
+func getAuthor(obj db.Object) int64 {
+	switch obj.Type {
+	case protocol.LinkPost:
+		fallthrough
+	case protocol.Comment:
+		fallthrough
+	case protocol.TextPost:
+		fallthrough
+	case protocol.Job:
+		fallthrough
+	case protocol.Poll:
+		fallthrough
+	case protocol.PollOpt:
+		return obj.Data.(*db.Post).Author
+	}
+	return 0
+}
+
+func dbObjectToAPIObject(obj db.Object, userMap map[int64]author) (retVal interface{}, err error) {
 	var o object
 	o.ID = strconv.FormatInt(obj.ID, 10)
 	typeStr, err := apiObjectType(obj.Type)
@@ -125,43 +117,36 @@ func dbObjectToAPIObject(obj db.Object) (retVal interface{}, err error) {
 	o.Score = obj.Score + obj.SourceScore
 	o.Deleted = obj.Deleted
 	o.UnixTime = obj.UnixTime
-	var kids []string
-	if len(obj.Kids.Kids) > 0 {
-		kids = make([]string, len(obj.Kids.Kids))
-		for idx, kid := range obj.Kids.Kids {
-			kids[idx] = strconv.FormatInt(kid, 10)
-		}
-	}
 	switch obj.Type {
 	case protocol.LinkPost:
 		post := obj.Data.(*db.Post)
 		retVal = linkPost{
-			object: o,
-			Text:   post.Text,
-			URL:    post.Url,
-			Author: strconv.FormatInt(post.Author, 10),
-			Dead:   post.Dead,
-			Kids:   kids,
+			object:  o,
+			Text:    post.Text,
+			URL:     post.Url,
+			Author:  userMap[post.Author],
+			Dead:    post.Dead,
+			NumKids: int32(len(obj.Kids.Kids)),
 		}
 		return
 	case protocol.Comment:
 		post := obj.Data.(*db.Post)
 		retVal = comment{
-			object: o,
-			Text:   post.Text,
-			Author: strconv.FormatInt(post.Author, 10),
-			Parent: strconv.FormatInt(post.Parent, 10),
-			Kids:   kids,
+			object:  o,
+			Text:    post.Text,
+			Author:  userMap[post.Author],
+			Parent:  strconv.FormatInt(post.Parent, 10),
+			NumKids: int32(len(obj.Kids.Kids)),
 		}
 		return
 	case protocol.TextPost:
 		post := obj.Data.(*db.Post)
 		retVal = textPost{
-			object: o,
-			Text:   post.Text,
-			Title:  post.Title,
-			Author: strconv.FormatInt(post.Author, 10),
-			Kids:   kids,
+			object:  o,
+			Text:    post.Text,
+			Title:   post.Title,
+			Author:  userMap[post.Author],
+			NumKids: int32(len(obj.Kids.Kids)),
 		}
 		return
 	case protocol.User:
@@ -178,16 +163,81 @@ func dbObjectToAPIObject(obj db.Object) (retVal interface{}, err error) {
 	}
 }
 
-func main() {
+func (api *apiCtx) hydrateAuthors(authors map[int64]author) error {
+	authorsToGet := make([]string, len(authors))
+	i := 0
+	for val := range authors {
+		authorsToGet[i] = strconv.FormatInt(val, 10)
+		i++
+	}
+	/*items, err := api.mcObj.GetMulti(authorsToGet)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to get authors")
+	}*/
+	items := make(map[string]*memcache.Item, len(authors))
+	for id := range authors {
+		key := strconv.FormatInt(id, 10)
+		item, err := api.mcObj.Get(key)
+		if err != nil {
+			if err.Error() == "memcache: cache miss" {
+				log.Println(fmt.Sprintf("Author with id %s not in db", key))
+				continue
+			}
+			return errors.Wrapf(err, "Failed to get item %s", key)
+		}
+		items[key] = item
+	}
+	for key, item := range items {
+		obj, err := db.ParseMemCacheObj(item.Value)
+		if err != nil {
+			return errors.Wrapf(err, "Failed to parse object for id %s"+key)
+		}
+		user := obj.Data.(*db.User)
+		authors[obj.ID] = author{Name: user.Name, ID: strconv.FormatInt(obj.ID, 10)}
+	}
+	return nil
+}
 
+var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
+
+func main() {
+	flag.Parse()
+	if *cpuprofile != "" {
+		log.Println("Starting cpuprofile")
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatal(err)
+		}
+		defer pprof.StopCPUProfile()
+	}
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	mc, err := memcache.New("localhost:11211")
+	mcObj, err := memcache.New("localhost:11211")
 	if err != nil {
 		log.Fatal(err)
 	}
-	mc.Get("@@object_data")
+	mcObj.Get("@@object_data")
+	mcListing, err := memcache.New("localhost:11211")
+	if err != nil {
+		log.Fatal(err)
+	}
+	mcListing.Get("@@listing_data")
+
+	api := apiCtx{
+		mcObj:     mcObj,
+		mcListing: mcListing,
+	}
 
 	e := echo.New()
+
+	e.Use(mw.Logger())
+	e.Use(mw.Recover())
+	e.GET("/exit", func(c echo.Context) error {
+		e.Close()
+		return nil
+	})
 	e.POST("/object/bulk", func(c echo.Context) error {
 		type bulkObjectRequest struct {
 			IDs []string `json:"ids"`
@@ -205,23 +255,39 @@ func main() {
 				return c.String(http.StatusBadRequest, fmt.Sprintf("Invalid id %s", id))
 			}
 		}
-		items, err := mc.GetMulti(req.IDs)
+		items, err := mcObj.GetMulti(req.IDs)
 		if err != nil {
 			log.Println(err)
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("Error getting ids %+v", req))
 		}
+		dbObjects := make([]db.Object, len(items))
+		authors := make(map[int64]author, len(items))
+		{
+			i := 0
+			for key, item := range items {
+				obj, err := db.ParseMemCacheObj(item.Value)
+				if err != nil {
+					log.Println(err)
+					return c.String(http.StatusInternalServerError, fmt.Sprintf("Error parsing object for id %s", key))
+				}
+				objAuthor := getAuthor(obj)
+				if objAuthor != 0 {
+					authors[objAuthor] = author{}
+				}
+				dbObjects[i] = obj
+				i++
+			}
+			if err = api.hydrateAuthors(authors); err != nil {
+				return err
+			}
+		}
 		values := make([]interface{}, len(items))
 		i := 0
-		for key, item := range items {
-			obj, err := parseMemCacheObj(item.Value)
+		for _, item := range dbObjects {
+			apiObj, err := dbObjectToAPIObject(item, authors)
 			if err != nil {
 				log.Println(err)
-				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error parsing object for id %s", key))
-			}
-			apiObj, err := dbObjectToAPIObject(obj)
-			if err != nil {
-				log.Println(err)
-				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error converting object for id %s", key))
+				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error converting object for id %d", item.ID))
 			}
 			values[i] = apiObj
 			i++
@@ -234,33 +300,117 @@ func main() {
 		}
 		return c.String(http.StatusOK, string(json))
 	})
+	e.GET("/hot", func(c echo.Context) error {
+		start := 0
+		str := c.QueryParam("start")
+		if str != "" {
+			start, err = strconv.Atoi(str)
+			if err != nil {
+				return c.String(http.StatusBadRequest, "Could not parse start parameter")
+			}
+		}
+		end := start + 30
+		str = c.QueryParam("count")
+		if str != "" {
+			count, err := strconv.Atoi(str)
+			if err != nil {
+				return c.String(http.StatusBadRequest, "Could not parse count parameter")
+			}
+			if count > 100 {
+				return c.String(http.StatusBadRequest, "Max 100 items per request")
+			}
+			end = start + count
+		}
+
+		listingItem, err := mcListing.Get(strconv.Itoa(db.ListingHot))
+		if err != nil {
+			log.Println(err)
+			return c.String(http.StatusInternalServerError, "Internal server error")
+		}
+		var listing db.Listing
+		if err := proto.Unmarshal(listingItem.Value, &listing); err != nil {
+			log.Println(err)
+			return c.String(http.StatusInternalServerError, "Internal server error")
+		}
+		if len(listing.Objects) < start {
+			end = start
+		} else if len(listing.Objects) < end {
+			end = len(listing.Objects) - 1
+		}
+		authors := make(map[int64]author, end-start)
+		dbObjects := make([]db.Object, end-start)
+		for i, val := range listing.Objects[start:end] {
+			item, err := mcObj.Get(strconv.FormatInt(val, 10))
+			if err != nil {
+				log.Println(err)
+				return c.String(http.StatusNotFound, fmt.Sprintf("Could not find %d", val))
+			}
+			obj, err := db.ParseMemCacheObj(item.Value)
+			if err != nil {
+				log.Println(err)
+				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error parsing object with id %d", val))
+			}
+			objAuthor := getAuthor(obj)
+			if objAuthor != 0 {
+				authors[objAuthor] = author{}
+			}
+
+			dbObjects[i] = obj
+		}
+		if err = api.hydrateAuthors(authors); err != nil {
+			log.Println(err)
+			return c.String(http.StatusInternalServerError, "Internal server error")
+		}
+
+		var values []interface{}
+		for _, obj := range dbObjects {
+			apiObj, err := dbObjectToAPIObject(obj, authors)
+			if err != nil {
+				log.Println(err)
+				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error converting object for id %d", obj.ID))
+			}
+			values = append(values, apiObj)
+		}
+
+		if c.QueryParam("pretty") != "" {
+			return c.JSONPretty(200, values, "  ")
+		}
+		return c.JSON(200, values)
+	})
 	e.GET("/object/:id", func(c echo.Context) error {
 		str := c.Param("id")
 		_, err := strconv.ParseInt(str, 10, 64)
 		if err != nil {
 			return c.String(http.StatusBadRequest, "Invalid id")
 		}
-		item, err := mc.Get(str)
+		item, err := mcObj.Get(str)
 		if err != nil {
 			log.Println(err)
 			return c.String(http.StatusNotFound, fmt.Sprintf("Could not find %s", str))
 		}
-		obj, err := parseMemCacheObj(item.Value)
+		obj, err := db.ParseMemCacheObj(item.Value)
 		if err != nil {
 			log.Println(err)
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("Error parsing id %s", str))
 		}
-		apiObj, err := dbObjectToAPIObject(obj)
+		authors := make(map[int64]author, 1)
+		objAuthor := getAuthor(obj)
+		if objAuthor != 0 {
+			authors[objAuthor] = author{}
+		}
+		if err = api.hydrateAuthors(authors); err != nil {
+			log.Println(err)
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("Internal server error"))
+		}
+		apiObj, err := dbObjectToAPIObject(obj, authors)
 		if err != nil {
 			log.Println(err)
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("Error converting object for id %s", str))
 		}
-		json, err := json.Marshal(apiObj)
-		if err != nil {
-			log.Println(err)
-			return c.String(http.StatusInternalServerError, fmt.Sprintf("Error parsing id %s", str))
+		if c.QueryParam("pretty") != "" {
+			return c.JSONPretty(200, apiObj, "  ")
 		}
-		return c.String(http.StatusOK, string(json))
+		return c.JSON(200, apiObj)
 	})
 	e.Logger.Fatal(e.Start(":1323"))
 }

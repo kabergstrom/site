@@ -9,4 +9,7 @@ const (
 
 	// HackerNewsGetObject subject for requesting objects from hacker news
 	HackerNewsGetObject string = "hacker-news.get-object"
+
+	// ObjectsModified subject for requesting objects from hacker news
+	ObjectsModified string = "objects.modified"
 )

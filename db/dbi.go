@@ -3,11 +3,21 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"io"
+	"strings"
 
 	"reflect"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/kabergstrom/site/protocol"
+)
+
+const (
+	// ListingHot ID for the cache of the "hot" listing
+	ListingHot = 1
+
+	// MaxListingSize the max size of a listing
+	MaxListingSize = 800
 )
 
 // Database interface for structured db updates
@@ -19,6 +29,43 @@ type Database struct {
 	getObject                   *sql.Stmt
 	getObjectIDFromSourceIDStmt *sql.Stmt
 	db                          *sql.DB
+}
+
+// ParseMemCacheObj parses the object_data innodb memcached view into a db.Object
+func ParseMemCacheObj(val []byte) (obj Object, err error) {
+	str := string(val)
+	endIndex := 0
+	for i := 0; i < 10; i++ {
+		increment := strings.Index(str[endIndex+1:], "|")
+		if increment == -1 {
+			err = io.EOF
+			return
+		}
+		endIndex += increment + 1
+	}
+	deletedNum := 0
+	wotStr := string(val[:endIndex])
+	_, err = fmt.Sscanf(wotStr, "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &obj.ID, &obj.Source, &obj.Type, &obj.Score, &obj.SourceScore, &deletedNum, &obj.UnixTime, &obj.Compression, &obj.Encoding, &obj.NumKids)
+	if err != nil {
+		return
+	}
+	data, err := DecodeData(val[endIndex+1:], obj.Type)
+	if err != nil {
+		return
+	}
+	obj.Data = data
+
+	serializedSize, err := proto.NewBuffer(val[endIndex+1:]).DecodeVarint()
+	if err != nil {
+		return
+	}
+	newStart := endIndex + int(serializedSize) + 2 + proto.SizeVarint(uint64(serializedSize))
+	kids, err := DecodeKids(val[newStart:])
+	if err != nil {
+		return
+	}
+	obj.Kids = kids
+	return
 }
 
 // NewDBI initialize a new database. Prepares statements
