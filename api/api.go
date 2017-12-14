@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"runtime/pprof"
+
+	"github.com/ngaut/log"
 
 	"strconv"
 
@@ -180,7 +181,7 @@ func (api *apiCtx) hydrateAuthors(authors map[int64]author) error {
 		item, err := api.mcObj.Get(key)
 		if err != nil {
 			if err.Error() == "memcache: cache miss" {
-				log.Println(fmt.Sprintf("Author with id %s not in db", key))
+				log.Infof("Author with id %s not in db", key)
 				continue
 			}
 			return errors.Wrapf(err, "Failed to get item %s", key)
@@ -198,42 +199,7 @@ func (api *apiCtx) hydrateAuthors(authors map[int64]author) error {
 	return nil
 }
 
-var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
-
-func main() {
-	flag.Parse()
-	if *cpuprofile != "" {
-		log.Println("Starting cpuprofile")
-		f, err := os.Create(*cpuprofile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := pprof.StartCPUProfile(f); err != nil {
-			log.Fatal(err)
-		}
-		defer pprof.StopCPUProfile()
-	}
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	mcObj, err := memcache.New("localhost:11211")
-	if err != nil {
-		log.Fatal(err)
-	}
-	mcObj.Get("@@object_data")
-	mcListing, err := memcache.New("localhost:11211")
-	if err != nil {
-		log.Fatal(err)
-	}
-	mcListing.Get("@@listing_data")
-
-	api := apiCtx{
-		mcObj:     mcObj,
-		mcListing: mcListing,
-	}
-
-	e := echo.New()
-
-	e.Use(mw.Logger())
-	e.Use(mw.Recover())
+func addEndpoints(e *echo.Echo, a *apiCtx) {
 	e.GET("/exit", func(c echo.Context) error {
 		e.Close()
 		return nil
@@ -255,9 +221,9 @@ func main() {
 				return c.String(http.StatusBadRequest, fmt.Sprintf("Invalid id %s", id))
 			}
 		}
-		items, err := mcObj.GetMulti(req.IDs)
+		items, err := a.mcObj.GetMulti(req.IDs)
 		if err != nil {
-			log.Println(err)
+			log.Error(err)
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("Error getting ids %+v", req))
 		}
 		dbObjects := make([]db.Object, len(items))
@@ -267,7 +233,7 @@ func main() {
 			for key, item := range items {
 				obj, err := db.ParseMemCacheObj(item.Value)
 				if err != nil {
-					log.Println(err)
+					log.Error(err)
 					return c.String(http.StatusInternalServerError, fmt.Sprintf("Error parsing object for id %s", key))
 				}
 				objAuthor := getAuthor(obj)
@@ -277,7 +243,7 @@ func main() {
 				dbObjects[i] = obj
 				i++
 			}
-			if err = api.hydrateAuthors(authors); err != nil {
+			if err = a.hydrateAuthors(authors); err != nil {
 				return err
 			}
 		}
@@ -286,7 +252,7 @@ func main() {
 		for _, item := range dbObjects {
 			apiObj, err := dbObjectToAPIObject(item, authors)
 			if err != nil {
-				log.Println(err)
+				log.Error(err)
 				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error converting object for id %d", item.ID))
 			}
 			values[i] = apiObj
@@ -295,7 +261,7 @@ func main() {
 
 		json, err := json.Marshal(values)
 		if err != nil {
-			log.Println(err)
+			log.Error(err)
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("Error marshalling items for ids %+v", req))
 		}
 		return c.String(http.StatusOK, string(json))
@@ -304,6 +270,7 @@ func main() {
 		start := 0
 		str := c.QueryParam("start")
 		if str != "" {
+			var err error
 			start, err = strconv.Atoi(str)
 			if err != nil {
 				return c.String(http.StatusBadRequest, "Could not parse start parameter")
@@ -322,14 +289,14 @@ func main() {
 			end = start + count
 		}
 
-		listingItem, err := mcListing.Get(strconv.Itoa(db.ListingHot))
+		listingItem, err := a.mcListing.Get(strconv.Itoa(db.ListingHot))
 		if err != nil {
-			log.Println(err)
+			log.Error(err)
 			return c.String(http.StatusInternalServerError, "Internal server error")
 		}
 		var listing db.Listing
 		if err := proto.Unmarshal(listingItem.Value, &listing); err != nil {
-			log.Println(err)
+			log.Error(err)
 			return c.String(http.StatusInternalServerError, "Internal server error")
 		}
 		if len(listing.Objects) < start {
@@ -340,14 +307,14 @@ func main() {
 		authors := make(map[int64]author, end-start)
 		dbObjects := make([]db.Object, end-start)
 		for i, val := range listing.Objects[start:end] {
-			item, err := mcObj.Get(strconv.FormatInt(val, 10))
+			item, err := a.mcObj.Get(strconv.FormatInt(val, 10))
 			if err != nil {
-				log.Println(err)
+				log.Error(err)
 				return c.String(http.StatusNotFound, fmt.Sprintf("Could not find %d", val))
 			}
 			obj, err := db.ParseMemCacheObj(item.Value)
 			if err != nil {
-				log.Println(err)
+				log.Error(err)
 				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error parsing object with id %d", val))
 			}
 			objAuthor := getAuthor(obj)
@@ -357,8 +324,8 @@ func main() {
 
 			dbObjects[i] = obj
 		}
-		if err = api.hydrateAuthors(authors); err != nil {
-			log.Println(err)
+		if err = a.hydrateAuthors(authors); err != nil {
+			log.Error(err)
 			return c.String(http.StatusInternalServerError, "Internal server error")
 		}
 
@@ -366,7 +333,7 @@ func main() {
 		for _, obj := range dbObjects {
 			apiObj, err := dbObjectToAPIObject(obj, authors)
 			if err != nil {
-				log.Println(err)
+				log.Error(err)
 				return c.String(http.StatusInternalServerError, fmt.Sprintf("Error converting object for id %d", obj.ID))
 			}
 			values = append(values, apiObj)
@@ -383,14 +350,14 @@ func main() {
 		if err != nil {
 			return c.String(http.StatusBadRequest, "Invalid id")
 		}
-		item, err := mcObj.Get(str)
+		item, err := a.mcObj.Get(str)
 		if err != nil {
-			log.Println(err)
+			log.Error(err)
 			return c.String(http.StatusNotFound, fmt.Sprintf("Could not find %s", str))
 		}
 		obj, err := db.ParseMemCacheObj(item.Value)
 		if err != nil {
-			log.Println(err)
+			log.Error(err)
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("Error parsing id %s", str))
 		}
 		authors := make(map[int64]author, 1)
@@ -398,13 +365,13 @@ func main() {
 		if objAuthor != 0 {
 			authors[objAuthor] = author{}
 		}
-		if err = api.hydrateAuthors(authors); err != nil {
-			log.Println(err)
+		if err = a.hydrateAuthors(authors); err != nil {
+			log.Error(err)
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("Internal server error"))
 		}
 		apiObj, err := dbObjectToAPIObject(obj, authors)
 		if err != nil {
-			log.Println(err)
+			log.Error(err)
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("Error converting object for id %s", str))
 		}
 		if c.QueryParam("pretty") != "" {
@@ -412,5 +379,56 @@ func main() {
 		}
 		return c.JSON(200, apiObj)
 	})
-	e.Logger.Fatal(e.Start(":1323"))
+}
+
+var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
+
+func openMemcachedView(url string, viewName string) (*memcache.Client, error) {
+	mc, err := memcache.New(url)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := mc.Get("@@" + viewName); err != nil {
+		return nil, err
+	}
+	return mc, err
+}
+
+func main() {
+	flag.Parse()
+	if *cpuprofile != "" {
+		log.Error("Starting cpuprofile")
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatal(err)
+		}
+		defer pprof.StopCPUProfile()
+	}
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	memcacheAddr := os.Getenv("API_MEMCACHE_ADDRESS")
+	mcObj, err := openMemcachedView(memcacheAddr, "object_data")
+	if err != nil {
+		log.Fatalf("Failed to connect to MySQL memcache plugin on %s : %s", memcacheAddr, err)
+	}
+	mcListing, err := openMemcachedView(memcacheAddr, "listing_data")
+	if err != nil {
+		log.Fatalf("Failed to connect to MySQL memcache plugin on %s : %s", memcacheAddr, err)
+	}
+
+	api := apiCtx{
+		mcObj:     mcObj,
+		mcListing: mcListing,
+	}
+
+	e := echo.New()
+
+	e.Use(mw.Logger())
+	e.Use(mw.Recover())
+	addEndpoints(e, &api)
+	serverHost := os.Getenv("API_SERVER_HOST")
+	serverPort := os.Getenv("API_SERVER_PORT")
+	e.Logger.Fatal(e.Start(fmt.Sprintf("%s:%s", serverHost, serverPort)))
 }

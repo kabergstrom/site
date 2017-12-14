@@ -1,16 +1,16 @@
 package main
 
 import (
-	"log"
+	"os"
 	"time"
+
+	"github.com/ngaut/log"
 
 	"strconv"
 
 	"sort"
 
 	"github.com/pkg/errors"
-
-	"fmt"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/kabergstrom/site/db"
@@ -114,23 +114,43 @@ func openMemcachedView(url string, viewName string) (*memcache.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	mc.Get("@@" + viewName)
+	if _, err := mc.Get("@@" + viewName); err != nil {
+		return nil, err
+	}
 	return mc, err
 }
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	mcObj, err := openMemcachedView("localhost:11211", "object_data")
+	memcacheAddr := os.Getenv("MEMCACHE_ADDRESS")
+	mcObj, err := openMemcachedView(memcacheAddr, "object_data")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to connect to MySQL memcache plugin on %s : %s", memcacheAddr, err)
 	}
-	mcListing, err := openMemcachedView("localhost:11211", "listing_data")
+	mcListing, err := openMemcachedView(memcacheAddr, "listing_data")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to connect to MySQL memcache plugin on %s : %s", memcacheAddr, err)
 	}
 
-	clusterID := "test-cluster"
-	nc, _ := stan.Connect(clusterID, "ranking")
+	clusterID := os.Getenv("NATS_CLUSTER_ID")
+	clientID := os.Getenv("NATS_CLIENT_ID")
+	if clientID == "" {
+		clientID = "ranking"
+	}
+	natsURL := os.Getenv("NATS_URL")
+
+	if natsURL == "" {
+		natsURL = stan.DefaultNatsURL
+	}
+	log.Infof("Connecting to nats server %s", natsURL)
+	nc, err := stan.Connect(clusterID, clientID, stan.NatsURL(natsURL))
+	if err != nil {
+		log.Fatalf("Error connecting to nats-streaming server: %s", err)
+	}
+	log.Infof("Connected to nats-streaming. url = %s id = %s ", nc.NatsConn().ConnectedUrl(), nc.NatsConn().ConnectedServerId())
+	for _, server := range nc.NatsConn().DiscoveredServers() {
+		log.Infof("Discovered nats server %s", server)
+	}
 	defer nc.Close()
 	objModChannel := make(chan *stan.Msg)
 
@@ -174,7 +194,7 @@ func main() {
 			for _, val := range windowBuffer {
 				val.msg.Ack()
 			}
-			fmt.Printf("Sorted ranking for %d objects in %s\n", len(objectsChanged), time.Now().Sub(start).String())
+			log.Infof("Sorted ranking for %d objects in %s\n", len(objectsChanged), time.Now().Sub(start).String())
 			windowBuffer = windowBuffer[:0]
 			ticker.Reset(time.Second * 5)
 		}

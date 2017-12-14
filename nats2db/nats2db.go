@@ -1,13 +1,12 @@
 package main
 
 import (
+	"os"
 	"time"
-
-	"fmt"
 
 	"database/sql"
 
-	"log"
+	"github.com/ngaut/log"
 
 	"strconv"
 
@@ -48,7 +47,7 @@ func typeToTypeID(source protocol.SourceID, typeStr string) protocol.ObjectType 
 		} else if typeStr == "pollopt" {
 			return protocol.PollOpt
 		}
-		log.Fatal(fmt.Sprintf("Unrecognized type %s for sourceID %d", typeStr, source))
+		log.Fatalf("Unrecognized type %s for sourceID %d", typeStr, source)
 	}
 	return 0
 }
@@ -79,15 +78,15 @@ func hnUserToDBObject(user protocol.HnUser, id int64, submitted []int64) (obj db
 }
 
 func (proc *postProcessor) processHnPost(m *stan.Msg) {
-	fmt.Printf("Processing post %s\n", strconv.FormatInt(int64(m.Sequence), 10))
+	log.Infof("Processing post %s\n", strconv.FormatInt(int64(m.Sequence), 10))
 	var ctx processingContext
 	ctx.processedPosts = make(map[int64]int64)
 	ctx.processedUsers = make(map[string]int64)
 	if err := proc.onHackerNewsPost(m.Data, ctx); err == nil {
 		m.Ack()
-		fmt.Printf("Acked post %s\n", strconv.FormatInt(int64(m.Sequence), 10))
+		log.Infof("Acked post %s\n", strconv.FormatInt(int64(m.Sequence), 10))
 	} else {
-		fmt.Printf("Error processing post %s: %s", strconv.FormatInt(int64(m.Sequence), 10), err)
+		log.Infof("Error processing post %s: %s", strconv.FormatInt(int64(m.Sequence), 10), err)
 	}
 }
 
@@ -129,7 +128,7 @@ func (proc *postProcessor) getUserIDFromHNID(author string, ctx processingContex
 			if err != nil {
 				return 0, err
 			}
-			fmt.Printf("Request for user %s took %s\n", author, time.Now().Sub(requestStart).String())
+			log.Infof("Request for user %s took %s\n", author, time.Now().Sub(requestStart).String())
 			var user protocol.HnUser
 			if err := proto.Unmarshal(msg.Data, &user); err != nil {
 				log.Fatal(err)
@@ -184,7 +183,7 @@ func (proc *postProcessor) getPostIDFromHNID(hnID int64, ctx processingContext) 
 		if err != nil {
 			return 0, err
 		}
-		fmt.Printf("Request for post %s took %s\n", strconv.FormatInt(hnID, 10), time.Now().Sub(requestStart).String())
+		log.Infof("Request for post %s took %s\n", strconv.FormatInt(hnID, 10), time.Now().Sub(requestStart).String())
 
 		proc.onHackerNewsPost(msg.Data, ctx)
 		if val, ok := ctx.processedPosts[hnID]; ok {
@@ -216,7 +215,7 @@ func (proc *postProcessor) onHackerNewsPost(postData []byte, ctx processingConte
 	}
 	ctx.processedPosts[p.Id] = objectID
 	if p.Type == "title" {
-		fmt.Printf("Processed post with title %s\n", p.Title)
+		log.Infof("Processed post with title %s\n", p.Title)
 	}
 
 	var dbData db.Post
@@ -269,7 +268,7 @@ func (proc *postProcessor) onHackerNewsPost(postData []byte, ctx processingConte
 	case "pollopt":
 		obj.Type = protocol.PollOpt
 	default:
-		log.Fatal(fmt.Sprintf("Unrecognized hackernews object type %s", p.Type))
+		log.Fatalf("Unrecognized hackernews object type %s", p.Type)
 	}
 	obj.SourceScore = p.Score
 	obj.Deleted = p.Deleted
@@ -345,38 +344,67 @@ func (proc *postProcessor) onHackerNewsPost(postData []byte, ctx processingConte
 func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-
 	var processor postProcessor
-	snowflake, err := snowflake.NewNode(1)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	processor.snowflake = snowflake
-	clusterID := "test-cluster"
-	nc, err := stan.Connect(clusterID, "nats2db")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer nc.Close()
-	processor.stan = nc
 
-	sql, err := sql.Open("mysql", "root:test@tcp(localhost:3306)/site")
-	if err != nil {
-		log.Fatal(err)
+	{
+		clusterID := os.Getenv("NATS_CLUSTER_ID")
+		clientID := os.Getenv("NATS_CLIENT_ID")
+		if clientID == "" {
+			clientID = "nats2db"
+		}
+		natsURL := os.Getenv("NATS_URL")
+
+		if natsURL == "" {
+			natsURL = stan.DefaultNatsURL
+		}
+		log.Infof("Connecting to nats server %s", natsURL)
+		nc, err := stan.Connect(clusterID, clientID, stan.NatsURL(natsURL))
+		if err != nil {
+			log.Fatalf("Error connecting to nats-streaming server: %s", err)
+		}
+		log.Infof("Connected to nats-streaming. url = %s id = %s ", nc.NatsConn().ConnectedUrl(), nc.NatsConn().ConnectedServerId())
+		for _, server := range nc.NatsConn().DiscoveredServers() {
+			log.Infof("Discovered nats server %s", server)
+		}
+		defer nc.Close()
+		processor.stan = nc
 	}
-	defer sql.Close()
-	dbi, err := db.NewDBI(sql)
-	if err != nil {
-		log.Fatal(err)
+
+	{
+		snowflakeServerID, err := strconv.Atoi(os.Getenv("SNOWFLAKE_SERVER_ID"))
+		if err != nil {
+			if _, present := os.LookupEnv("SNOWFLAKE_SERVER_ID"); present {
+				log.Fatalf("Failed to parse SNOWFLAKE_SERVER_ID %s", err)
+			}
+			snowflakeServerID = 1
+		}
+
+		snowflake, err := snowflake.NewNode(int64(snowflakeServerID))
+		if err != nil {
+			log.Fatal(err)
+		}
+		processor.snowflake = snowflake
+
 	}
-	processor.db = dbi
+
+	{
+		sql, err := sql.Open("mysql", os.Getenv("MYSQL_DATA_SOURCE_NAME"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer sql.Close()
+		dbi, err := db.NewDBI(sql)
+		if err != nil {
+			log.Fatal(err)
+		}
+		processor.db = dbi
+	}
 
 	aw, _ := time.ParseDuration("30s")
 
 	hnPostChannel := make(chan *stan.Msg)
 
-	nc.Subscribe(subjects.HackerNewsPosts, func(m *stan.Msg) { hnPostChannel <- m }, stan.SetManualAckMode(), stan.AckWait(aw), stan.DurableName("nats2db"), stan.StartAt(pb.StartPosition_First))
+	processor.stan.Subscribe(subjects.HackerNewsPosts, func(m *stan.Msg) { hnPostChannel <- m }, stan.SetManualAckMode(), stan.AckWait(aw), stan.DurableName("nats2db"), stan.StartAt(pb.StartPosition_First))
 	concurrency := 10
 	for i := 0; i < concurrency; i++ {
 		go func(c chan *stan.Msg) {
@@ -386,7 +414,7 @@ func main() {
 			}
 		}(hnPostChannel)
 	}
-	for nc.NatsConn().Status() != nats.DISCONNECTED {
+	for processor.stan.NatsConn().Status() != nats.DISCONNECTED {
 		time.Sleep(time.Second)
 	}
 }

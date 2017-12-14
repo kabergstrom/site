@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"os"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
@@ -58,9 +58,25 @@ func (h *myEventHandler) String() string {
 	return "MyEventHandler"
 }
 func main() {
-	nats, err := stan.Connect("test-cluster", "mysql2nats")
+
+	clusterID := os.Getenv("NATS_CLUSTER_ID")
+	clientID := os.Getenv("NATS_CLIENT_ID")
+	if clientID == "" {
+		clientID = "mysql2nats"
+	}
+	natsURL := os.Getenv("NATS_URL")
+
+	if natsURL == "" {
+		natsURL = stan.DefaultNatsURL
+	}
+	log.Infof("Connecting to nats server %s", natsURL)
+	nats, err := stan.Connect(clusterID, clientID, stan.NatsURL(natsURL))
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Error connecting to nats-streaming server: %s", err)
+	}
+	log.Infof("Connected to nats-streaming. url = %s id = %s ", nats.NatsConn().ConnectedUrl(), nats.NatsConn().ConnectedServerId())
+	for _, server := range nats.NatsConn().DiscoveredServers() {
+		log.Infof("Discovered nats server %s", server)
 	}
 	defer nats.Close()
 	// get starting position
@@ -100,11 +116,10 @@ func main() {
 		sub.Unsubscribe()
 	}
 	cfg := canal.NewDefaultConfig()
-	cfg.Addr = "127.0.0.1:3306"
-	cfg.User = "root"
-	cfg.Password = "test"
+	cfg.Addr = os.Getenv("MYSQL_ADDRESS")
+	cfg.User = os.Getenv("MYSQL_USER")
+	cfg.Password = os.Getenv("MYSQL_PASSWORD")
 	cfg.Flavor = "mysql"
-	// We only care table canal_test in test db
 	cfg.Dump.TableDB = "site"
 	cfg.Dump.Tables = []string{"object"}
 
@@ -117,10 +132,10 @@ func main() {
 	c.SetEventHandler(&myEventHandler{nats: nats})
 
 	if startPos.Name == "" {
-		fmt.Printf("Could not read start position from nats streaming server, starting from current..")
+		log.Info("Could not read start position from nats streaming server, starting from current..")
 		err = c.Start()
 	} else {
-		fmt.Printf("Resuming from pos %s %d", startPos.Name, startPos.Pos)
+		log.Infof("Resuming from pos %s %d", startPos.Name, startPos.Pos)
 		err = c.StartFrom(startPos)
 	}
 	if err != nil {

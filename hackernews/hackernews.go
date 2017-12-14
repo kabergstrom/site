@@ -2,8 +2,12 @@ package main
 
 import (
 	"fmt"
-	"log"
+
+	"os"
+	"strconv"
 	"time"
+
+	"github.com/ngaut/log"
 
 	"net/http"
 
@@ -79,8 +83,26 @@ func hnPostToProtocol(p hnPost) protocol.HnPost {
 }
 
 func main() {
-	clusterID := "test-cluster"
-	nc, _ := stan.Connect(clusterID, "hacker-news-producer")
+
+	clusterID := os.Getenv("NATS_CLUSTER_ID")
+	clientID := os.Getenv("NATS_CLIENT_ID")
+	if clientID == "" {
+		clientID = "hacker-news-producer"
+	}
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		natsURL = stan.DefaultNatsURL
+	}
+
+	log.Infof("Connecting to nats server %s", natsURL)
+	nc, err := stan.Connect(clusterID, clientID, stan.NatsURL(natsURL))
+	if err != nil {
+		log.Fatalf("Error connecting to nats-streaming server: %s", err)
+	}
+	log.Infof("Connected to nats-streaming. url = %s id = %s ", nc.NatsConn().ConnectedUrl(), nc.NatsConn().ConnectedServerId())
+	for _, server := range nc.NatsConn().DiscoveredServers() {
+		log.Infof("Discovered nats server %s", server)
+	}
 
 	defer nc.Close()
 
@@ -98,7 +120,10 @@ func main() {
 		nc.NatsConn().Subscribe(subjects.HackerNewsGetObject, func(m *nats.Msg) {
 			getChan <- m
 		})
-		concurrency := 20
+		concurrency, err := strconv.Atoi(os.Getenv("HN_REQUEST_CONCURRENCY"))
+		if err != nil {
+			concurrency = 1
+		}
 		for i := 0; i < concurrency; i++ {
 			go func(c chan *nats.Msg) {
 				reqFgo := firego.New("", client)
@@ -153,7 +178,7 @@ func main() {
 	fireGoClient := firego.New("", client)
 	ackHandler := func(ackedNuid string, err error) {
 		if err != nil {
-			log.Printf("Warning: error publishing msg id %s: %v\n", ackedNuid, err.Error())
+			log.Errorf("Warning: error publishing msg id %s: %v\n", ackedNuid, err.Error())
 		}
 	}
 	for event := range notifications {
