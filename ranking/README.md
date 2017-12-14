@@ -5,7 +5,8 @@ Reads modified objects sent by `mysql2nats` and maintains listings (hot) based o
 
 ### Configuration
 Configuration is done with environment variables
-`API_MEMCACHE_ADDRESS` - REQUIRED host + port to the MySQL memcache plugin
-`NATS_CLUSTER_ID` - REQUIRED the NATS cluster ID. Must match the ID specified when starting the NATS cluster
-`NATS_URL` - OPTIONAL URL used to connect to NATS. Defaults to `nats://localhost:4222`
-`NATS_CLIENT_ID` - OPTIONAL defaults to `nats2db`
+
+- `API_MEMCACHE_ADDRESS` - REQUIRED host + port to the MySQL memcache plugin
+- `NATS_CLUSTER_ID` - REQUIRED the NATS cluster ID. Must match the ID specified when starting the NATS cluster
+- `NATS_URL` - OPTIONAL URL used to connect to NATS. Defaults to `nats://localhost:4222`
+- `NATS_CLIENT_ID` - OPTIONAL defaults to `nats2db`

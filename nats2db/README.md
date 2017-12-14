@@ -6,8 +6,9 @@ It is possible to run multiple `nats2db` instances simultaneously but `SNOWFLAKE
 
 ### Configuration
 Configuration is done with environment variables
-`NATS_CLUSTER_ID` - REQUIRED the NATS cluster ID. Must match the ID specified when starting the NATS cluster
-`MYSQL_DATA_SOURCE_NAME` - REQUIRED the MySQL Data Source Name as defined in the [Go-MySQL-Driver](https://github.com/Go-SQL-Driver/MySQL/#dsn-data-source-name)
-`NATS_URL` - OPTIONAL URL used to connect to NATS. Defaults to `nats://localhost:4222`
-`NATS_CLIENT_ID` - OPTIONAL defaults to `nats2db`
-`SNOWFLAKE_SERVER_ID` - OPTIONAL a number specifying the Snowflake node ID for generating object IDs. When running multiple `nats2db`, this must be unique for each instance
+
+- `NATS_CLUSTER_ID` - REQUIRED the NATS cluster ID. Must match the ID specified when starting the NATS cluster
+- `MYSQL_DATA_SOURCE_NAME` - REQUIRED the MySQL Data Source Name as defined in the [Go-MySQL-Driver](https://github.com/Go-SQL-Driver/MySQL/#dsn-data-source-name)
+- `NATS_URL` - OPTIONAL URL used to connect to NATS. Defaults to `nats://localhost:4222`
+- `NATS_CLIENT_ID` - OPTIONAL defaults to `nats2db`
+- `SNOWFLAKE_SERVER_ID` - OPTIONAL a number specifying the Snowflake node ID for generating object IDs. When running multiple `nats2db`, this must be unique for each instance

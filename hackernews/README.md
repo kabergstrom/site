@@ -6,6 +6,7 @@ It is recommended to only run one `hackernews` instance per cluster.
 
 ### Configuration
 Configuration is done with environment variables
-`NATS_URL` - OPTIONAL URL used to connect to NATS. Defaults to `nats://localhost:4222`
-`NATS_CLUSTER_ID` - REQUIRED the NATS cluster ID. Must match the ID specified when starting the NATS cluster
-`NATS_CLIENT_ID` - OPTIONAL defaults to `hacker-news-producer`
+
+- `NATS_URL` - OPTIONAL URL used to connect to NATS. Defaults to `nats://localhost:4222`
+- `NATS_CLUSTER_ID` - REQUIRED the NATS cluster ID. Must match the ID specified when starting the NATS cluster
+- `NATS_CLIENT_ID` - OPTIONAL defaults to `hacker-news-producer`
